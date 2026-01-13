@@ -10,41 +10,98 @@ from hole_detector import Hole
 @dataclass
 class Wire:
     """表示面包板上的一条连接线"""
-    start: Hole
-    end: Hole
+    start: Hole = None  # 起始孔，自由线条时为None
+    end: Hole = None    # 结束孔，自由线条时为None
     color: Tuple[int, int, int] = (0, 0, 255)  # BGR格式，默认红色
     thickness: int = 2
     waypoints: List[Tuple[int, int]] = field(default_factory=list)  # 路径中间点
+    id: int = field(default_factory=lambda: Wire._next_id())  # 唯一标识
+    selected: bool = False  # 是否被选中
+    hovered: bool = False   # 是否被悬停
+    is_free: bool = False   # 是否是自由线条（不依赖孔）
+    start_pos: Tuple[int, int] = None  # 自由线条的起点坐标
+    end_pos: Tuple[int, int] = None    # 自由线条的终点坐标
+    
+    _id_counter: int = field(default=0, init=False, repr=False, compare=False)
+    
+    @staticmethod
+    def _next_id() -> int:
+        Wire._id_counter_value = getattr(Wire, '_id_counter_value', 0) + 1
+        return Wire._id_counter_value
+    
+    @property
+    def start_position(self) -> Tuple[int, int]:
+        """获取起点坐标（兼容孔和自由线条）"""
+        if self.is_free:
+            return self.start_pos
+        return self.start.position if self.start else (0, 0)
+    
+    @property
+    def end_position(self) -> Tuple[int, int]:
+        """获取终点坐标（兼容孔和自由线条）"""
+        if self.is_free:
+            return self.end_pos
+        return self.end.position if self.end else (0, 0)
     
     def draw(self, image: np.ndarray) -> np.ndarray:
         """在图像上绘制连接线"""
         result = image.copy()
         
-        if not self.waypoints:
-            # 如果没有中间点，直接绘制直线
-            cv2.line(result, self.start.position, self.end.position, 
-                    self.color, self.thickness, cv2.LINE_AA)
-        else:
-            # 如果有中间点，绘制折线
-            # 从起点到第一个中间点
-            cv2.line(result, self.start.position, self.waypoints[0], 
-                    self.color, self.thickness, cv2.LINE_AA)
-            
-            # 中间点之间的连线
-            for i in range(len(self.waypoints) - 1):
-                cv2.line(result, self.waypoints[i], self.waypoints[i + 1], 
-                        self.color, self.thickness, cv2.LINE_AA)
-            
-            # 最后一个中间点到终点
-            cv2.line(result, self.waypoints[-1], self.end.position, 
-                    self.color, self.thickness, cv2.LINE_AA)
+        # 根据状态调整绘制样式
+        draw_color = self.color
+        draw_thickness = self.thickness
+        
+        if self.selected:
+            # 选中状态：先绘制高亮边框
+            highlight_thickness = self.thickness + 4
+            highlight_color = (255, 255, 255)  # 白色边框
+            self._draw_line_path(result, highlight_color, highlight_thickness)
+        
+        if self.hovered and not self.selected:
+            # 悬停状态：线条加粗
+            draw_thickness = self.thickness + 2
+        
+        # 绘制主线条
+        self._draw_line_path(result, draw_color, draw_thickness)
         
         # 在起点和终点绘制圆点
-        dot_radius = self.thickness + 2  # 圆点半径比线宽大2个像素
-        cv2.circle(result, self.start.position, dot_radius, self.color, -1, cv2.LINE_AA)
-        cv2.circle(result, self.end.position, dot_radius, self.color, -1, cv2.LINE_AA)
+        dot_radius = self.thickness + 2
+        cv2.circle(result, self.start_position, dot_radius, draw_color, -1, cv2.LINE_AA)
+        cv2.circle(result, self.end_position, dot_radius, draw_color, -1, cv2.LINE_AA)
+        
+        # 选中状态：绘制端点控制点
+        if self.selected:
+            control_size = 6
+            # 起点控制点（白色方块带黑边）
+            self._draw_control_point(result, self.start_position, control_size)
+            self._draw_control_point(result, self.end_position, control_size)
+            # 中间点控制点
+            for wp in self.waypoints:
+                self._draw_control_point(result, wp, control_size - 2)
         
         return result
+    
+    def _draw_line_path(self, image: np.ndarray, color: Tuple[int, int, int], thickness: int):
+        """绘制线条路径"""
+        if not self.waypoints:
+            cv2.line(image, self.start_position, self.end_position, 
+                    color, thickness, cv2.LINE_AA)
+        else:
+            cv2.line(image, self.start_position, self.waypoints[0], 
+                    color, thickness, cv2.LINE_AA)
+            for i in range(len(self.waypoints) - 1):
+                cv2.line(image, self.waypoints[i], self.waypoints[i + 1], 
+                        color, thickness, cv2.LINE_AA)
+            cv2.line(image, self.waypoints[-1], self.end_position, 
+                    color, thickness, cv2.LINE_AA)
+    
+    def _draw_control_point(self, image: np.ndarray, position: Tuple[int, int], size: int):
+        """绘制控制点（方块）"""
+        x, y = position
+        # 黑色边框
+        cv2.rectangle(image, (x - size, y - size), (x + size, y + size), (0, 0, 0), 2)
+        # 白色填充
+        cv2.rectangle(image, (x - size + 1, y - size + 1), (x + size - 1, y + size - 1), (255, 255, 255), -1)
     
     def length(self) -> float:
         """计算连接线的长度"""
@@ -52,13 +109,16 @@ class Wire:
         
         if not self.waypoints:
             # 如果没有中间点，直接计算起点到终点的距离
-            dx = self.start.x - self.end.x
-            dy = self.start.y - self.end.y
+            start_x, start_y = self.start_position
+            end_x, end_y = self.end_position
+            dx = start_x - end_x
+            dy = start_y - end_y
             return np.sqrt(dx*dx + dy*dy)
         else:
             # 计算起点到第一个中间点的距离
-            dx = self.start.x - self.waypoints[0][0]
-            dy = self.start.y - self.waypoints[0][1]
+            start_x, start_y = self.start_position
+            dx = start_x - self.waypoints[0][0]
+            dy = start_y - self.waypoints[0][1]
             total_length += np.sqrt(dx*dx + dy*dy)
             
             # 计算中间点之间的距离
@@ -68,8 +128,9 @@ class Wire:
                 total_length += np.sqrt(dx*dx + dy*dy)
             
             # 计算最后一个中间点到终点的距离
-            dx = self.waypoints[-1][0] - self.end.x
-            dy = self.waypoints[-1][1] - self.end.y
+            end_x, end_y = self.end_position
+            dx = self.waypoints[-1][0] - end_x
+            dy = self.waypoints[-1][1] - end_y
             total_length += np.sqrt(dx*dx + dy*dy)
             
             return total_length
@@ -77,6 +138,10 @@ class Wire:
     def __eq__(self, other):
         """判断两条线是否相等（连接相同的孔）"""
         if not isinstance(other, Wire):
+            return False
+        
+        # 自由线条不参与相等性比较
+        if self.is_free or other.is_free:
             return False
         
         # 两条线连接相同的孔（不考虑方向和中间点）
@@ -91,6 +156,8 @@ class WireManager:
     def __init__(self):
         self.wires: List[Wire] = []
         self.wire_history: List[List[Wire]] = []  # 用于撤销功能的历史记录
+        self.selected_wire: Optional[Wire] = None  # 当前选中的线条
+        self.hovered_wire: Optional[Wire] = None   # 当前悬停的线条
         self.colors = [
             (19, 61, 207),    # 红色 #cf3d13 (BGR格式)
             (0, 0, 0),        # 黑色
@@ -103,6 +170,83 @@ class WireManager:
         self.use_fixed_color = False  # 是否使用固定颜色
         self.fixed_color = (19, 61, 207)  # 默认固定颜色为红色 #cf3d13
         self.line_thickness = 5  # 默认线宽
+    
+    def point_to_segment_distance(self, px: int, py: int, 
+                                   x1: int, y1: int, x2: int, y2: int) -> float:
+        """计算点到线段的距离"""
+        dx = x2 - x1
+        dy = y2 - y1
+        
+        if dx == 0 and dy == 0:
+            return np.sqrt((px - x1) ** 2 + (py - y1) ** 2)
+        
+        t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)))
+        nearest_x = x1 + t * dx
+        nearest_y = y1 + t * dy
+        
+        return np.sqrt((px - nearest_x) ** 2 + (py - nearest_y) ** 2)
+    
+    def distance_to_wire(self, x: int, y: int, wire: Wire) -> float:
+        """计算点到线条的最短距离"""
+        min_distance = float('inf')
+        points = [wire.start_position] + wire.waypoints + [wire.end_position]
+        
+        for i in range(len(points) - 1):
+            x1, y1 = points[i]
+            x2, y2 = points[i + 1]
+            dist = self.point_to_segment_distance(x, y, x1, y1, x2, y2)
+            min_distance = min(min_distance, dist)
+        
+        return min_distance
+    
+    def find_wire_at_point(self, x: int, y: int, threshold: float = 8) -> Optional[Wire]:
+        """找到点击位置附近的线条"""
+        for wire in reversed(self.wires):
+            distance = self.distance_to_wire(x, y, wire)
+            if distance < threshold:
+                return wire
+        return None
+    
+    def select_wire(self, wire: Optional[Wire]):
+        """选中一条线"""
+        if self.selected_wire:
+            self.selected_wire.selected = False
+        self.selected_wire = wire
+        if wire:
+            wire.selected = True
+    
+    def set_hovered_wire(self, wire: Optional[Wire]):
+        """设置悬停的线条"""
+        if self.hovered_wire == wire:
+            return
+        if self.hovered_wire:
+            self.hovered_wire.hovered = False
+        self.hovered_wire = wire
+        if wire:
+            wire.hovered = True
+    
+    def delete_selected_wire(self) -> bool:
+        """删除选中的线条"""
+        if not self.selected_wire:
+            return False
+        self.save_state()
+        if self.selected_wire in self.wires:
+            self.wires.remove(self.selected_wire)
+            self.selected_wire = None
+            return True
+        return False
+    
+    def update_selected_wire_color(self, color: Tuple[int, int, int]):
+        """更新选中线条的颜色"""
+        if self.selected_wire:
+            self.save_state()
+            self.selected_wire.color = color
+    
+    def update_selected_wire_thickness(self, thickness: int):
+        """更新选中线条的线宽"""
+        if self.selected_wire:
+            self.save_state()
+            self.selected_wire.thickness = thickness
     
     def add_wire(self, start_hole: Hole, end_hole: Hole, waypoints: List[Tuple[int, int]] = None) -> Optional[Wire]:
         """
@@ -134,6 +278,64 @@ class WireManager:
         
         self.wires.append(new_wire)
         return new_wire
+    
+    def add_free_wire(self, start_pos: Tuple[int, int], end_pos: Tuple[int, int], 
+                      waypoints: List[Tuple[int, int]] = None) -> Wire:
+        """
+        添加一条自由线条（不依赖孔）
+        
+        Args:
+            start_pos: 起点坐标
+            end_pos: 终点坐标
+            waypoints: 路径中间点，默认为None（直线）
+            
+        Returns:
+            添加的自由线条
+        """
+        # 保存当前状态到历史记录
+        self.save_state()
+        
+        # 创建自由线条
+        color = self.fixed_color if self.use_fixed_color else self.get_next_color()
+        new_wire = Wire(
+            start=None,
+            end=None,
+            color=color,
+            thickness=self.line_thickness,
+            waypoints=waypoints if waypoints else [],
+            is_free=True,
+            start_pos=start_pos,
+            end_pos=end_pos
+        )
+        
+        self.wires.append(new_wire)
+        return new_wire
+    
+    def update_wire_position(self, wire: Wire, start_pos: Tuple[int, int] = None, 
+                            end_pos: Tuple[int, int] = None, waypoint_index: int = None, 
+                            waypoint_pos: Tuple[int, int] = None):
+        """
+        更新线条的位置（用于拖动）
+        
+        Args:
+            wire: 要更新的线条
+            start_pos: 新的起点位置
+            end_pos: 新的终点位置
+            waypoint_index: 要更新的中间点索引
+            waypoint_pos: 新的中间点位置
+        """
+        if not wire.is_free:
+            return  # 非自由线条不能拖动
+        
+        self.save_state()
+        
+        if start_pos is not None:
+            wire.start_pos = start_pos
+        if end_pos is not None:
+            wire.end_pos = end_pos
+        if waypoint_index is not None and waypoint_pos is not None:
+            if 0 <= waypoint_index < len(wire.waypoints):
+                wire.waypoints[waypoint_index] = waypoint_pos
     
     def remove_wire(self, wire: Wire) -> bool:
         """
@@ -323,12 +525,24 @@ class WireManager:
         """
         connections = []
         for wire in self.wires:
-            connection = {
-                'start': {'x': wire.start.x, 'y': wire.start.y},
-                'end': {'x': wire.end.x, 'y': wire.end.y},
-                'color': list(wire.color),
-                'thickness': wire.thickness
-            }
+            if wire.is_free:
+                # 自由线条
+                connection = {
+                    'is_free': True,
+                    'start': {'x': wire.start_pos[0], 'y': wire.start_pos[1]},
+                    'end': {'x': wire.end_pos[0], 'y': wire.end_pos[1]},
+                    'color': list(wire.color),
+                    'thickness': wire.thickness
+                }
+            else:
+                # 普通连线
+                connection = {
+                    'is_free': False,
+                    'start': {'x': wire.start.x, 'y': wire.start.y},
+                    'end': {'x': wire.end.x, 'y': wire.end.y},
+                    'color': list(wire.color),
+                    'thickness': wire.thickness
+                }
             
             # 如果有中间点，也导出
             if wire.waypoints:
@@ -379,22 +593,39 @@ class WireManager:
         for conn in data['connections']:
             start_x, start_y = conn['start']['x'], conn['start']['y']
             end_x, end_y = conn['end']['x'], conn['end']['y']
+            color = tuple(conn.get('color', (0, 0, 255)))
+            thickness = conn.get('thickness', 2)
+            is_free = conn.get('is_free', False)
             
-            # 查找对应的孔对象
-            start_hole = hole_map.get((start_x, start_y))
-            end_hole = hole_map.get((end_x, end_y))
-            
-            if start_hole and end_hole:
-                # 创建连接线
-                color = tuple(conn.get('color', (0, 0, 255)))
-                thickness = conn.get('thickness', 2)
-                
-                wire = Wire(start_hole, end_hole, color, thickness)
+            if is_free:
+                # 创建自由线条
+                wire = Wire(
+                    start=None,
+                    end=None,
+                    color=color,
+                    thickness=thickness,
+                    is_free=True,
+                    start_pos=(start_x, start_y),
+                    end_pos=(end_x, end_y)
+                )
                 
                 # 如果有中间点，也导入
                 if 'waypoints' in conn:
                     wire.waypoints = [(wp['x'], wp['y']) for wp in conn['waypoints']]
                     
                 manager.wires.append(wire)
+            else:
+                # 创建普通连线（依赖孔）
+                start_hole = hole_map.get((start_x, start_y))
+                end_hole = hole_map.get((end_x, end_y))
+                
+                if start_hole and end_hole:
+                    wire = Wire(start_hole, end_hole, color, thickness)
+                    
+                    # 如果有中间点，也导入
+                    if 'waypoints' in conn:
+                        wire.waypoints = [(wp['x'], wp['y']) for wp in conn['waypoints']]
+                        
+                    manager.wires.append(wire)
                 
         return manager 

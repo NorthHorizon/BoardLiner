@@ -166,6 +166,12 @@ class ZoomableImageLabel(QLabel):
         self.handling_event = False
 
 class BreadboardConnector(QMainWindow):
+    # 工具模式常量
+    TOOL_SELECT = 'select'
+    TOOL_WIRE = 'wire'
+    TOOL_PATH = 'path'
+    TOOL_FREE = 'free'  # 自由线条工具
+    
     def __init__(self):
         super().__init__()
         
@@ -174,6 +180,9 @@ class BreadboardConnector(QMainWindow):
         self.holes = []
         self.wire_manager = WireManager()
         self.hole_detector = HoleDetector()
+        
+        # 当前工具模式
+        self.current_tool = self.TOOL_WIRE  # 默认连线工具
         
         # 绘制状态
         self.drawing = False
@@ -187,6 +196,16 @@ class BreadboardConnector(QMainWindow):
         self.path_mode = False  # 是否启用多点路径模式
         self.current_path = []  # 当前路径的中间点
         self.path_start_hole = None  # 路径起点
+        
+        # 自由线条绘制状态
+        self.free_drawing = False
+        self.free_start_pos = None
+        self.free_waypoints = []
+        
+        # 拖动控制点状态
+        self.dragging_control_point = False
+        self.dragging_point_type = None  # 'start', 'end', 'waypoint'
+        self.dragging_waypoint_index = None
         
         self.initUI()
         
@@ -268,6 +287,86 @@ class BreadboardConnector(QMainWindow):
         detection_layout.addRow(self.detect_button)
         detection_group.setLayout(detection_layout)
         
+        # 工具选择
+        tool_group = QGroupBox("工具")
+        tool_layout = QVBoxLayout()
+        
+        self.tool_buttons = QButtonGroup()
+        self.tool_buttons.setExclusive(True)
+        
+        self.select_tool_btn = QRadioButton("🖱️ 选择工具")
+        self.select_tool_btn.setToolTip("点击线条进行选中、删除或修改属性")
+        self.select_tool_btn.clicked.connect(lambda: self.set_tool(self.TOOL_SELECT))
+        
+        self.wire_tool_btn = QRadioButton("✏️ 连线工具")
+        self.wire_tool_btn.setToolTip("在孔之间绘制连接线")
+        self.wire_tool_btn.setChecked(True)
+        self.wire_tool_btn.clicked.connect(lambda: self.set_tool(self.TOOL_WIRE))
+        
+        self.path_tool_btn = QRadioButton("📍 路径工具")
+        self.path_tool_btn.setToolTip("绘制多点路径连线，左键添加点，右键完成")
+        self.path_tool_btn.clicked.connect(lambda: self.set_tool(self.TOOL_PATH))
+        
+        self.free_tool_btn = QRadioButton("🖊️ 自由线条")
+        self.free_tool_btn.setToolTip("绘制不依赖孔的自由线条，左键添加点，右键完成")
+        self.free_tool_btn.clicked.connect(lambda: self.set_tool(self.TOOL_FREE))
+        
+        self.tool_buttons.addButton(self.select_tool_btn, 0)
+        self.tool_buttons.addButton(self.wire_tool_btn, 1)
+        self.tool_buttons.addButton(self.path_tool_btn, 2)
+        self.tool_buttons.addButton(self.free_tool_btn, 3)
+        
+        tool_layout.addWidget(self.select_tool_btn)
+        tool_layout.addWidget(self.wire_tool_btn)
+        tool_layout.addWidget(self.path_tool_btn)
+        tool_layout.addWidget(self.free_tool_btn)
+        tool_group.setLayout(tool_layout)
+        
+        # 选中线条属性面板
+        self.property_group = QGroupBox("选中线条属性")
+        property_layout = QFormLayout()
+        
+        self.prop_start_label = QLabel("-")
+        self.prop_end_label = QLabel("-")
+        self.prop_length_label = QLabel("-")
+        
+        property_layout.addRow("起点:", self.prop_start_label)
+        property_layout.addRow("终点:", self.prop_end_label)
+        property_layout.addRow("长度:", self.prop_length_label)
+        
+        # 线条颜色选择
+        self.prop_color_combo = QComboBox()
+        self.prop_color_combo.addItem("红色", (19, 61, 207))
+        self.prop_color_combo.addItem("黑色", (0, 0, 0))
+        self.prop_color_combo.addItem("绿色", (68, 121, 53))
+        self.prop_color_combo.addItem("橙色", (31, 120, 238))
+        self.prop_color_combo.addItem("青色", (175, 164, 91))
+        self.prop_color_combo.addItem("紫色", (134, 61, 130))
+        self.prop_color_combo.currentIndexChanged.connect(self.on_prop_color_changed)
+        self.prop_color_combo.setEnabled(False)
+        
+        property_layout.addRow("颜色:", self.prop_color_combo)
+        
+        # 线条宽度
+        self.prop_thickness_spin = QSpinBox()
+        self.prop_thickness_spin.setRange(1, 10)
+        self.prop_thickness_spin.setValue(2)
+        self.prop_thickness_spin.valueChanged.connect(self.on_prop_thickness_changed)
+        self.prop_thickness_spin.setEnabled(False)
+        
+        property_layout.addRow("线宽:", self.prop_thickness_spin)
+        
+        # 删除按钮
+        self.delete_wire_btn = QPushButton("删除此线条")
+        self.delete_wire_btn.clicked.connect(self.delete_selected_wire)
+        self.delete_wire_btn.setEnabled(False)
+        self.delete_wire_btn.setStyleSheet("QPushButton { color: red; }")
+        
+        property_layout.addRow(self.delete_wire_btn)
+        
+        self.property_group.setLayout(property_layout)
+        self.property_group.setVisible(False)  # 默认隐藏
+        
         # 连线操作
         wire_group = QGroupBox("连线操作")
         wire_layout = QVBoxLayout()
@@ -288,11 +387,13 @@ class BreadboardConnector(QMainWindow):
         
         # 添加完成路径按钮
         self.finish_path_button = QPushButton('完成当前路径')
+        self.finish_path_button.setToolTip('或者右键点击终点孔完成')
         self.finish_path_button.clicked.connect(self.finish_current_path)
         self.finish_path_button.setEnabled(False)
         
         # 添加取消路径按钮
         self.cancel_path_button = QPushButton('取消当前路径')
+        self.cancel_path_button.setToolTip('取消正在绘制的路径')
         self.cancel_path_button.clicked.connect(self.cancel_current_path)
         self.cancel_path_button.setEnabled(False)
         
@@ -386,6 +487,8 @@ class BreadboardConnector(QMainWindow):
         
         # 添加所有控制组到控制面板
         control_layout.addWidget(file_group)
+        control_layout.addWidget(tool_group)
+        control_layout.addWidget(self.property_group)
         control_layout.addWidget(detection_group)
         control_layout.addWidget(wire_group)
         control_layout.addWidget(color_group)
@@ -437,6 +540,156 @@ class BreadboardConnector(QMainWindow):
         zoom_percent = int(self.image_label.scale_factor * 100)
         self.zoom_slider.setValue(zoom_percent)
         self.zoom_label.setText(f"{zoom_percent}%")
+    
+    def set_tool(self, tool):
+        """切换工具模式"""
+        self.current_tool = tool
+        
+        # 取消当前选中和悬停
+        self.wire_manager.select_wire(None)
+        self.wire_manager.set_hovered_wire(None)
+        
+        # 取消当前路径绘制
+        self.cancel_current_path()
+        
+        # 取消自由线条绘制
+        self.free_drawing = False
+        self.free_start_pos = None
+        self.free_waypoints = []
+        
+        # 同步旧的 path_mode_check
+        self.path_mode_check.blockSignals(True)
+        self.path_mode_check.setChecked(tool == self.TOOL_PATH)
+        self.path_mode_check.blockSignals(False)
+        
+        # 更新属性面板可见性
+        self.property_group.setVisible(tool == self.TOOL_SELECT)
+        self.update_property_panel()
+        
+        # 更新鼠标光标
+        if tool == self.TOOL_SELECT:
+            self.image_label.setCursor(Qt.ArrowCursor)
+            self.statusBar.showMessage('选择工具：点击线条进行选中，拖动控制点调整位置')
+        elif tool == self.TOOL_WIRE:
+            self.image_label.setCursor(Qt.CrossCursor)
+            self.statusBar.showMessage('连线工具：在孔之间绘制连接线')
+        elif tool == self.TOOL_PATH:
+            self.image_label.setCursor(Qt.CrossCursor)
+            self.statusBar.showMessage('路径工具：点击起点孔，点击中间孔添加转折，右键点击终点孔完成')
+        elif tool == self.TOOL_FREE:
+            self.image_label.setCursor(Qt.CrossCursor)
+            self.statusBar.showMessage('自由线条：点击起点，移动鼠标，点击添加转折点，右键完成')
+        
+        self.update_display()
+    
+    def update_property_panel(self):
+        """更新属性面板显示"""
+        wire = self.wire_manager.selected_wire
+        
+        if wire:
+            start_x, start_y = wire.start_position
+            end_x, end_y = wire.end_position
+            
+            if wire.is_free:
+                self.prop_start_label.setText(f"({start_x}, {start_y}) [自由]")
+                self.prop_end_label.setText(f"({end_x}, {end_y}) [自由]")
+            else:
+                self.prop_start_label.setText(f"({start_x}, {start_y})")
+                self.prop_end_label.setText(f"({end_x}, {end_y})")
+            
+            self.prop_length_label.setText(f"{wire.length():.1f} px")
+            
+            # 设置颜色下拉框
+            color_map = {
+                (19, 61, 207): 0,
+                (0, 0, 0): 1,
+                (68, 121, 53): 2,
+                (31, 120, 238): 3,
+                (175, 164, 91): 4,
+                (134, 61, 130): 5,
+            }
+            color_index = color_map.get(wire.color, 0)
+            self.prop_color_combo.blockSignals(True)
+            self.prop_color_combo.setCurrentIndex(color_index)
+            self.prop_color_combo.blockSignals(False)
+            
+            # 设置线宽
+            self.prop_thickness_spin.blockSignals(True)
+            self.prop_thickness_spin.setValue(wire.thickness)
+            self.prop_thickness_spin.blockSignals(False)
+            
+            # 启用控件
+            self.prop_color_combo.setEnabled(True)
+            self.prop_thickness_spin.setEnabled(True)
+            self.delete_wire_btn.setEnabled(True)
+        else:
+            self.prop_start_label.setText("-")
+            self.prop_end_label.setText("-")
+            self.prop_length_label.setText("-")
+            self.prop_color_combo.setEnabled(False)
+            self.prop_thickness_spin.setEnabled(False)
+            self.delete_wire_btn.setEnabled(False)
+    
+    def on_prop_color_changed(self, index):
+        """属性面板颜色改变"""
+        color = self.prop_color_combo.currentData()
+        if color:
+            self.wire_manager.update_selected_wire_color(color)
+            self.update_display()
+    
+    def on_prop_thickness_changed(self, value):
+        """属性面板线宽改变"""
+        self.wire_manager.update_selected_wire_thickness(value)
+        self.update_display()
+    
+    def delete_selected_wire(self):
+        """删除选中的线条"""
+        if self.wire_manager.delete_selected_wire():
+            self.statusBar.showMessage('已删除选中的线条')
+            self.update_property_panel()
+            self.update_display()
+            self.undo_button.setEnabled(True)
+    
+    def screen_to_image_coords(self, screen_x, screen_y):
+        """将屏幕坐标转换为图像坐标"""
+        pixmap = self.image_label.pixmap()
+        if not pixmap:
+            return None, None
+        
+        img_label_x = (self.image_label.width() - pixmap.width()) / 2 + self.image_label.offset_x
+        img_label_y = (self.image_label.height() - pixmap.height()) / 2 + self.image_label.offset_y
+        
+        rel_x = screen_x - img_label_x
+        rel_y = screen_y - img_label_y
+        
+        img_x = int(rel_x / self.image_label.scale_factor)
+        img_y = int(rel_y / self.image_label.scale_factor)
+        
+        return img_x, img_y
+    
+    def find_control_point_at(self, x, y, wire):
+        """查找点击位置是否在某个控制点上"""
+        if not wire or not wire.selected:
+            return None, None
+        
+        threshold = 10  # 控制点检测阈值
+        
+        # 检查起点
+        start_x, start_y = wire.start_position
+        if abs(x - start_x) < threshold and abs(y - start_y) < threshold:
+            return 'start', None
+        
+        # 检查终点
+        end_x, end_y = wire.end_position
+        if abs(x - end_x) < threshold and abs(y - end_y) < threshold:
+            return 'end', None
+        
+        # 检查中间点
+        for i, (wp_x, wp_y) in enumerate(wire.waypoints):
+            if abs(x - wp_x) < threshold and abs(y - wp_y) < threshold:
+                return 'waypoint', i
+        
+        return None, None
     
     def update_detection_params(self):
         """更新孔检测参数"""
@@ -558,50 +811,79 @@ class BreadboardConnector(QMainWindow):
         elif not self.holes or self.image is None:
             pass  # 不做任何处理
         elif event.button() == Qt.LeftButton:
-            nearest_hole = self.find_nearest_hole(event.pos())
-            if nearest_hole:
-                if self.path_mode:
-                    # 多点路径模式
-                    if not self.path_start_hole:
-                        # 如果没有起点，设置起点
-                        self.path_start_hole = nearest_hole
-                        self.statusBar.showMessage(f'设置路径起点: ({nearest_hole.x}, {nearest_hole.y})')
-                        self.cancel_path_button.setEnabled(True)
-                    else:
-                        # 如果已有起点，添加中间点或设置终点
-                        if nearest_hole == self.path_start_hole:
-                            # 如果点击的是起点，不做任何处理
-                            pass
+            # 根据当前工具处理
+            if self.current_tool == self.TOOL_SELECT:
+                # 选择工具模式
+                img_x, img_y = self.screen_to_image_coords(event.pos().x(), event.pos().y())
+                if img_x is not None:
+                    # 先检查是否点击了控制点
+                    selected_wire = self.wire_manager.selected_wire
+                    if selected_wire and selected_wire.is_free:
+                        point_type, waypoint_idx = self.find_control_point_at(img_x, img_y, selected_wire)
+                        if point_type:
+                            # 开始拖动控制点
+                            self.dragging_control_point = True
+                            self.dragging_point_type = point_type
+                            self.dragging_waypoint_index = waypoint_idx
+                            self.statusBar.showMessage(f'拖动控制点: {point_type}')
+                            self.handling_mouse_event = False
+                            return
+                    
+                    # 没有点击控制点，尝试选中线条
+                    wire = self.wire_manager.find_wire_at_point(img_x, img_y)
+                    self.wire_manager.select_wire(wire)
+                    self.update_property_panel()
+                    self.update_display()
+                    if wire:
+                        if wire.is_free:
+                            self.statusBar.showMessage(f'选中自由线条 (可拖动控制点调整)')
                         else:
-                            # 获取点击位置在原始图像中的坐标
-                            pixmap = self.image_label.pixmap()
-                            if pixmap:
-                                img_label_x = (self.image_label.width() - pixmap.width()) / 2 + self.image_label.offset_x
-                                img_label_y = (self.image_label.height() - pixmap.height()) / 2 + self.image_label.offset_y
-                                
-                                rel_x = event.pos().x() - img_label_x
-                                rel_y = event.pos().y() - img_label_y
-                                
-                                img_x = int(rel_x / self.image_label.scale_factor)
-                                img_y = int(rel_y / self.image_label.scale_factor)
-                                
-                                # 添加中间点
-                                self.current_path.append((nearest_hole.x, nearest_hole.y))
-                                self.current_hole = nearest_hole
-                                self.statusBar.showMessage(f'添加路径点: ({nearest_hole.x}, {nearest_hole.y})')
-                                self.finish_path_button.setEnabled(True)
-                                
-                                # 更新显示
-                                self.update_display_with_path()
-                else:
-                    # 普通模式
+                            start_x, start_y = wire.start_position
+                            end_x, end_y = wire.end_position
+                            self.statusBar.showMessage(f'选中线条: ({start_x}, {start_y}) -> ({end_x}, {end_y})')
+                    else:
+                        self.statusBar.showMessage('未选中任何线条')
+            elif self.current_tool == self.TOOL_FREE:
+                # 自由线条工具
+                img_x, img_y = self.screen_to_image_coords(event.pos().x(), event.pos().y())
+                if img_x is not None:
+                    if not self.free_drawing:
+                        # 开始绘制
+                        self.free_drawing = True
+                        self.free_start_pos = (img_x, img_y)
+                        self.temp_line_end = (event.x(), event.y())
+                        self.statusBar.showMessage(f'自由线条起点: ({img_x}, {img_y})，点击添加转折点，右键完成')
+                    else:
+                        # 添加转折点
+                        self.free_waypoints.append((img_x, img_y))
+                        self.statusBar.showMessage(f'添加转折点: ({img_x}, {img_y})')
+                        self.update_display_with_free_line()
+            elif self.current_tool == self.TOOL_WIRE:
+                # 连线工具模式
+                nearest_hole = self.find_nearest_hole(event.pos())
+                if nearest_hole:
                     self.drawing = True
                     self.current_hole = nearest_hole
                     self.temp_line_end = (event.x(), event.y())
-                    
-                    # 更新显示
                     self.update_display_with_temp_line()
                     self.statusBar.showMessage(f'开始绘制连线，从孔 ({nearest_hole.x}, {nearest_hole.y})')
+            elif self.current_tool == self.TOOL_PATH:
+                # 路径工具模式
+                nearest_hole = self.find_nearest_hole(event.pos())
+                if nearest_hole:
+                    if not self.path_start_hole:
+                        # 如果没有起点，设置起点
+                        self.path_start_hole = nearest_hole
+                        self.statusBar.showMessage(f'设置路径起点: ({nearest_hole.x}, {nearest_hole.y})，点击中间孔添加转折，右键点击终点孔完成')
+                        self.cancel_path_button.setEnabled(True)
+                    else:
+                        # 如果已有起点，添加中间点
+                        if nearest_hole != self.path_start_hole:
+                            self.current_path.append((nearest_hole.x, nearest_hole.y))
+                            self.current_hole = nearest_hole
+                            self.statusBar.showMessage(f'添加路径点: ({nearest_hole.x}, {nearest_hole.y})')
+                            self.finish_path_button.setEnabled(True)
+                            self.update_display_with_path()
         
         self.handling_mouse_event = False
     
@@ -623,6 +905,37 @@ class BreadboardConnector(QMainWindow):
             # 更新显示
             self.image_label.update()
             self.update_view_offset()
+        elif self.dragging_control_point:
+            # 拖动控制点
+            img_x, img_y = self.screen_to_image_coords(event.pos().x(), event.pos().y())
+            if img_x is not None:
+                wire = self.wire_manager.selected_wire
+                if wire and wire.is_free:
+                    if self.dragging_point_type == 'start':
+                        self.wire_manager.update_wire_position(wire, start_pos=(img_x, img_y))
+                    elif self.dragging_point_type == 'end':
+                        self.wire_manager.update_wire_position(wire, end_pos=(img_x, img_y))
+                    elif self.dragging_point_type == 'waypoint':
+                        self.wire_manager.update_wire_position(wire, waypoint_index=self.dragging_waypoint_index, 
+                                                              waypoint_pos=(img_x, img_y))
+                    self.update_display()
+        elif self.current_tool == self.TOOL_SELECT and self.image is not None:
+            # 选择工具模式：检测悬停
+            img_x, img_y = self.screen_to_image_coords(event.pos().x(), event.pos().y())
+            if img_x is not None:
+                wire = self.wire_manager.find_wire_at_point(img_x, img_y)
+                if wire != self.wire_manager.hovered_wire:
+                    self.wire_manager.set_hovered_wire(wire)
+                    self.update_display()
+                    # 更新鼠标光标
+                    if wire:
+                        self.image_label.setCursor(Qt.PointingHandCursor)
+                    else:
+                        self.image_label.setCursor(Qt.ArrowCursor)
+        elif self.current_tool == self.TOOL_FREE and self.free_drawing:
+            # 自由线条绘制：更新预览
+            self.temp_line_end = (event.x(), event.y())
+            self.update_display_with_free_line()
         elif self.drawing and self.holes and self.current_hole:
             # 更新临时线的终点
             self.temp_line_end = (event.x(), event.y())
@@ -640,13 +953,91 @@ class BreadboardConnector(QMainWindow):
             
         self.handling_mouse_event = True
         
-        # 如果正在拖动，则处理拖动结束逻辑
+        # 如果正在拖动视图
         if self.image_label.dragging:
             self.image_label.dragging = False
             if self.image_label.space_pressed:
                 self.image_label.setCursor(Qt.OpenHandCursor)
             else:
                 self.image_label.setCursor(Qt.ArrowCursor)
+        # 如果正在拖动控制点
+        elif self.dragging_control_point:
+            self.dragging_control_point = False
+            self.dragging_point_type = None
+            self.dragging_waypoint_index = None
+            self.update_property_panel()  # 更新长度显示
+            self.statusBar.showMessage('控制点调整完成')
+        # 自由线条工具：右键完成绘制
+        elif self.current_tool == self.TOOL_FREE and self.free_drawing and event.button() == Qt.RightButton:
+            # 如果有转折点，使用最后一个转折点作为终点
+            if self.free_waypoints:
+                end_pos = self.free_waypoints[-1]
+                # 移除最后一个转折点（因为它现在是终点）
+                waypoints = self.free_waypoints[:-1] if len(self.free_waypoints) > 1 else None
+            else:
+                # 没有转折点，使用右键点击位置作为终点
+                img_x, img_y = self.screen_to_image_coords(event.pos().x(), event.pos().y())
+                if img_x is None:
+                    self.handling_mouse_event = False
+                    return
+                end_pos = (img_x, img_y)
+                waypoints = None
+            
+            # 创建自由线条
+            wire = self.wire_manager.add_free_wire(
+                self.free_start_pos, 
+                end_pos,
+                waypoints
+            )
+            self.statusBar.showMessage(f'完成自由线条绘制')
+            self.undo_button.setEnabled(True)
+            
+            # 重置状态
+            self.free_drawing = False
+            self.free_start_pos = None
+            self.free_waypoints = []
+            self.temp_line_end = None
+            
+            # 更新显示
+            self.update_display()
+        # 路径工具：右键完成路径
+        elif self.current_tool == self.TOOL_PATH and self.path_start_hole and event.button() == Qt.RightButton:
+            # 如果有中间点，使用最后一个中间点对应的孔作为终点
+            if self.current_hole and self.current_path:
+                # 使用最后点击的孔作为终点
+                end_hole = self.current_hole
+                # 移除最后一个中间点（因为它现在是终点）
+                waypoints = self.current_path[:-1] if len(self.current_path) > 1 else None
+                
+                # 添加连线
+                wire = self.wire_manager.add_wire(self.path_start_hole, end_hole, waypoints)
+                if wire:
+                    self.statusBar.showMessage(f'完成多点路径连线: ({self.path_start_hole.x}, {self.path_start_hole.y}) -> ({end_hole.x}, {end_hole.y})')
+                    self.undo_button.setEnabled(True)
+                else:
+                    self.statusBar.showMessage(f'连线已存在')
+            else:
+                # 没有中间点，找右键点击位置最近的孔作为终点
+                nearest_hole = self.find_nearest_hole(event.pos())
+                if nearest_hole and nearest_hole != self.path_start_hole:
+                    wire = self.wire_manager.add_wire(self.path_start_hole, nearest_hole, None)
+                    if wire:
+                        self.statusBar.showMessage(f'完成路径连线: ({self.path_start_hole.x}, {self.path_start_hole.y}) -> ({nearest_hole.x}, {nearest_hole.y})')
+                        self.undo_button.setEnabled(True)
+                    else:
+                        self.statusBar.showMessage(f'连线已存在')
+                else:
+                    self.statusBar.showMessage('未找到有效的终点孔，取消路径')
+            
+            # 重置路径
+            self.path_start_hole = None
+            self.current_path = []
+            self.current_hole = None
+            self.finish_path_button.setEnabled(False)
+            self.cancel_path_button.setEnabled(False)
+            
+            # 更新显示
+            self.update_display()
         elif self.drawing and self.holes and self.current_hole and event.button() == Qt.LeftButton:
             nearest_hole = self.find_nearest_hole(event.pos())
             if nearest_hole and nearest_hole != self.current_hole:
@@ -765,6 +1156,64 @@ class BreadboardConnector(QMainWindow):
             # 绘制中间点
             for point in self.current_path:
                 cv2.circle(display_image, point, 3, (255, 0, 0), -1)
+        
+        # 显示图像
+        self.display_image(display_image)
+    
+    def update_display_with_free_line(self):
+        """更新显示，包括自由线条预览"""
+        if self.image is None or not self.free_drawing or not self.free_start_pos or not self.temp_line_end:
+            return
+            
+        # 创建显示图像
+        display_image = self.image.copy()
+        
+        # 绘制孔
+        if self.show_holes_check.isChecked() and self.holes:
+            for hole in self.holes:
+                cv2.circle(display_image, hole.position, int(hole.radius), (0, 255, 0), -1)
+        
+        # 绘制已有的连接线
+        if self.show_wires_check.isChecked():
+            display_image = self.wire_manager.draw_all_wires(display_image)
+        
+        # 获取当前颜色
+        color = self.wire_manager.fixed_color if self.wire_manager.use_fixed_color else (0, 0, 255)
+        
+        # 获取图像在Label中的位置
+        pixmap = self.image_label.pixmap()
+        if pixmap:
+            img_label_x = (self.image_label.width() - pixmap.width()) / 2 + self.image_label.offset_x
+            img_label_y = (self.image_label.height() - pixmap.height()) / 2 + self.image_label.offset_y
+            
+            # 将临时线终点转换为图像坐标
+            rel_x = self.temp_line_end[0] - img_label_x
+            rel_y = self.temp_line_end[1] - img_label_y
+            temp_end_x = int(rel_x / self.image_label.scale_factor)
+            temp_end_y = int(rel_y / self.image_label.scale_factor)
+            
+            # 确保坐标在图像范围内
+            h, w = display_image.shape[:2]
+            temp_end_x = max(0, min(temp_end_x, w-1))
+            temp_end_y = max(0, min(temp_end_y, h-1))
+            
+            # 绘制自由线条预览
+            if not self.free_waypoints:
+                # 没有中间点，直接画线
+                cv2.line(display_image, self.free_start_pos, (temp_end_x, temp_end_y), color, 2, cv2.LINE_AA)
+            else:
+                # 有中间点，画折线
+                cv2.line(display_image, self.free_start_pos, self.free_waypoints[0], color, 2, cv2.LINE_AA)
+                for i in range(len(self.free_waypoints) - 1):
+                    cv2.line(display_image, self.free_waypoints[i], self.free_waypoints[i + 1], color, 2, cv2.LINE_AA)
+                cv2.line(display_image, self.free_waypoints[-1], (temp_end_x, temp_end_y), color, 2, cv2.LINE_AA)
+                
+                # 绘制中间点
+                for point in self.free_waypoints:
+                    cv2.circle(display_image, point, 4, (255, 0, 0), -1)
+            
+            # 绘制起点
+            cv2.circle(display_image, self.free_start_pos, 5, color, -1)
         
         # 显示图像
         self.display_image(display_image)
@@ -892,6 +1341,12 @@ class BreadboardConnector(QMainWindow):
 
     def keyPressEvent(self, event):
         """处理键盘按键事件"""
+        # Delete 键删除选中的线条
+        if event.key() == Qt.Key_Delete:
+            if self.current_tool == self.TOOL_SELECT and self.wire_manager.selected_wire:
+                self.delete_selected_wire()
+                return
+        
         # 将键盘事件传递给图像标签
         if self.image_label:
             self.image_label.keyPressEvent(event)
@@ -937,17 +1392,17 @@ class BreadboardConnector(QMainWindow):
             self.statusBar.showMessage(f'已选择固定颜色: {color_name}')
 
     def toggle_path_mode(self, state):
-        """切换多点路径模式"""
-        self.path_mode = state == Qt.Checked
-        if self.path_mode:
-            self.statusBar.showMessage('已启用多点路径模式')
+        """切换多点路径模式（旧的 checkbox 方式，保持兼容）"""
+        if state == Qt.Checked:
+            self.set_tool(self.TOOL_PATH)
+            self.path_tool_btn.setChecked(True)
         else:
-            self.statusBar.showMessage('已禁用多点路径模式')
-            self.cancel_current_path()
+            self.set_tool(self.TOOL_WIRE)
+            self.wire_tool_btn.setChecked(True)
     
     def finish_current_path(self):
         """完成当前路径"""
-        if not self.path_mode or not self.path_start_hole or not self.current_hole:
+        if self.current_tool != self.TOOL_PATH or not self.path_start_hole or not self.current_hole:
             return
             
         # 添加连线（带中间点）
@@ -970,9 +1425,6 @@ class BreadboardConnector(QMainWindow):
     
     def cancel_current_path(self):
         """取消当前路径"""
-        if not self.path_mode:
-            return
-            
         # 重置路径
         self.path_start_hole = None
         self.current_path = []
