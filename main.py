@@ -207,7 +207,45 @@ class BreadboardConnector(QMainWindow):
         self.dragging_point_type = None  # 'start', 'end', 'waypoint'
         self.dragging_waypoint_index = None
         
+        # 更新节流机制
+        # 性能优化说明：
+        # 通过限制更新频率避免过度频繁的显示刷新。
+        # last_update_time 记录上次更新的时间戳（毫秒）
+        # update_interval_ms 设置最小更新间隔（默认 16ms ≈ 60fps）
+        # 这可以防止鼠标快速移动时触发过多的绘制操作，降低 CPU 和内存带宽消耗
+        self.last_update_time = 0
+        self.update_interval_ms = 16  # 约60fps
+        
         self.initUI()
+    
+    def _should_update(self):
+        """
+        检查是否应该更新显示（节流）
+        
+        性能优化说明：
+        实现更新节流机制，避免过度频繁的显示更新。
+        通过比较当前时间与上次更新时间，确保更新间隔不小于 update_interval_ms。
+        这在鼠标快速移动、拖动控制点等高频事件中特别有效，
+        可以将更新频率限制在 60fps 以内，避免不必要的性能消耗。
+        
+        Returns:
+            bool: 如果距离上次更新已超过设定间隔，返回 True；否则返回 False
+        """
+        current_time = self._current_time_ms()
+        return (current_time - self.last_update_time) >= self.update_interval_ms
+    
+    def _current_time_ms(self):
+        """
+        获取当前时间（毫秒）
+        
+        性能优化说明：
+        为节流机制提供时间戳。使用毫秒精度足以满足 60fps 的更新频率控制需求。
+        
+        Returns:
+            int: 当前时间的毫秒表示
+        """
+        import time
+        return int(time.time() * 1000)
         
     def initUI(self):
         self.setWindowTitle('面包板连线工具')
@@ -888,7 +926,19 @@ class BreadboardConnector(QMainWindow):
         self.handling_mouse_event = False
     
     def mouse_move_event(self, event):
-        """鼠标移动事件处理"""
+        """
+        鼠标移动事件处理
+        
+        性能优化说明：
+        在多个场景中应用了更新节流机制：
+        1. 拖动控制点时：通过 _should_update() 检查，避免过度频繁的更新
+        2. 选择工具悬停检测：只在悬停线条变化时更新，并应用节流
+        3. 自由线条预览：应用节流限制预览更新频率
+        4. 临时线条绘制：应用节流限制更新频率
+        
+        这些优化确保鼠标快速移动时不会触发过多的显示更新，
+        将更新频率控制在 60fps 以内，显著降低 CPU 和内存带宽消耗。
+        """
         # 防止递归调用
         if self.handling_mouse_event:
             return
@@ -906,42 +956,50 @@ class BreadboardConnector(QMainWindow):
             self.image_label.update()
             self.update_view_offset()
         elif self.dragging_control_point:
-            # 拖动控制点
-            img_x, img_y = self.screen_to_image_coords(event.pos().x(), event.pos().y())
-            if img_x is not None:
-                wire = self.wire_manager.selected_wire
-                if wire and wire.is_free:
-                    if self.dragging_point_type == 'start':
-                        self.wire_manager.update_wire_position(wire, start_pos=(img_x, img_y))
-                    elif self.dragging_point_type == 'end':
-                        self.wire_manager.update_wire_position(wire, end_pos=(img_x, img_y))
-                    elif self.dragging_point_type == 'waypoint':
-                        self.wire_manager.update_wire_position(wire, waypoint_index=self.dragging_waypoint_index, 
-                                                              waypoint_pos=(img_x, img_y))
-                    self.update_display()
+            # 拖动控制点 - 应用节流
+            if self._should_update():
+                img_x, img_y = self.screen_to_image_coords(event.pos().x(), event.pos().y())
+                if img_x is not None:
+                    wire = self.wire_manager.selected_wire
+                    if wire and wire.is_free:
+                        if self.dragging_point_type == 'start':
+                            self.wire_manager.update_wire_position(wire, start_pos=(img_x, img_y))
+                        elif self.dragging_point_type == 'end':
+                            self.wire_manager.update_wire_position(wire, end_pos=(img_x, img_y))
+                        elif self.dragging_point_type == 'waypoint':
+                            self.wire_manager.update_wire_position(wire, waypoint_index=self.dragging_waypoint_index, 
+                                                                  waypoint_pos=(img_x, img_y))
+                        self.update_display()
+                        self.last_update_time = self._current_time_ms()
         elif self.current_tool == self.TOOL_SELECT and self.image is not None:
-            # 选择工具模式：检测悬停
-            img_x, img_y = self.screen_to_image_coords(event.pos().x(), event.pos().y())
-            if img_x is not None:
-                wire = self.wire_manager.find_wire_at_point(img_x, img_y)
-                if wire != self.wire_manager.hovered_wire:
-                    self.wire_manager.set_hovered_wire(wire)
-                    self.update_display()
-                    # 更新鼠标光标
-                    if wire:
-                        self.image_label.setCursor(Qt.PointingHandCursor)
-                    else:
-                        self.image_label.setCursor(Qt.ArrowCursor)
+            # 选择工具模式：检测悬停 - 应用节流
+            if self._should_update():
+                img_x, img_y = self.screen_to_image_coords(event.pos().x(), event.pos().y())
+                if img_x is not None:
+                    wire = self.wire_manager.find_wire_at_point(img_x, img_y)
+                    if wire != self.wire_manager.hovered_wire:
+                        self.wire_manager.set_hovered_wire(wire)
+                        self.update_display()
+                        self.last_update_time = self._current_time_ms()
+                        # 更新鼠标光标
+                        if wire:
+                            self.image_label.setCursor(Qt.PointingHandCursor)
+                        else:
+                            self.image_label.setCursor(Qt.ArrowCursor)
         elif self.current_tool == self.TOOL_FREE and self.free_drawing:
-            # 自由线条绘制：更新预览
-            self.temp_line_end = (event.x(), event.y())
-            self.update_display_with_free_line()
+            # 自由线条绘制：更新预览 - 应用节流
+            if self._should_update():
+                self.temp_line_end = (event.x(), event.y())
+                self.update_display_with_free_line()
+                self.last_update_time = self._current_time_ms()
         elif self.drawing and self.holes and self.current_hole:
-            # 更新临时线的终点
-            self.temp_line_end = (event.x(), event.y())
-            
-            # 更新显示
-            self.update_display_with_temp_line()
+            # 更新临时线的终点 - 应用节流
+            if self._should_update():
+                self.temp_line_end = (event.x(), event.y())
+                
+                # 更新显示
+                self.update_display_with_temp_line()
+                self.last_update_time = self._current_time_ms()
         
         self.handling_mouse_event = False
     
@@ -1062,19 +1120,33 @@ class BreadboardConnector(QMainWindow):
         self.handling_mouse_event = False
     
     def update_display(self):
-        """更新显示"""
+        """
+        更新显示（优化版本 - 只创建一次图像副本）
+        
+        性能优化说明：
+        这是主显示更新方法的优化版本，遵循"创建副本 → 绘制孔 → 绘制线条 → 显示"的流程。
+        关键优化点：
+        1. 只在开始时创建一次图像副本（唯一的内存拷贝）
+        2. 直接在副本上绘制孔位（原地修改，无额外拷贝）
+        3. 调用优化后的 draw_all_wires，它会直接在副本上绘制所有线条（无额外拷贝）
+        
+        优化前：每条线都会创建副本，导致链式拷贝
+        优化后：整个绘制过程只有一次图像拷贝
+        
+        对于包含 N 条线的场景，内存拷贝量从 O(N) 降低到 O(1)。
+        """
         if self.image is None:
             return
         
-        # 创建显示图像的副本
+        # 创建显示图像的副本（唯一的拷贝）
         display_image = self.image.copy()
         
-        # 绘制孔
+        # 直接在副本上绘制孔（原地修改，无额外拷贝）
         if self.show_holes_check.isChecked() and self.holes:
             for hole in self.holes:
                 cv2.circle(display_image, hole.position, int(hole.radius), (0, 255, 0), -1)
         
-        # 绘制连接线
+        # 调用优化后的 draw_all_wires（直接在 display_image 上绘制）
         if self.show_wires_check.isChecked():
             display_image = self.wire_manager.draw_all_wires(display_image)
             
@@ -1082,19 +1154,30 @@ class BreadboardConnector(QMainWindow):
         self.display_image(display_image)
     
     def update_display_with_temp_line(self):
-        """更新显示，包括临时连接线"""
+        """
+        更新显示，包括临时连接线（优化版本 - 只创建一次图像副本）
+        
+        性能优化说明：
+        应用与 update_display 相同的优化策略：
+        1. 只在开始时创建一次图像副本
+        2. 直接在副本上绘制孔位（无额外拷贝）
+        3. 调用优化后的 draw_all_wires（无额外拷贝）
+        4. 直接在副本上绘制临时线条（无额外拷贝）
+        
+        确保在绘制预览线条时也不会产生链式图像拷贝。
+        """
         if self.image is None or not self.current_hole or not self.temp_line_end:
             return
             
-        # 创建显示图像
+        # 创建显示图像的副本（唯一的拷贝）
         display_image = self.image.copy()
         
-        # 绘制孔
+        # 直接在副本上绘制孔（原地修改，无额外拷贝）
         if self.show_holes_check.isChecked() and self.holes:
             for hole in self.holes:
                 cv2.circle(display_image, hole.position, int(hole.radius), (0, 255, 0), -1)
         
-        # 绘制已有的连接线
+        # 调用优化后的 draw_all_wires（直接在 display_image 上绘制）
         if self.show_wires_check.isChecked():
             display_image = self.wire_manager.draw_all_wires(display_image)
         
@@ -1118,33 +1201,44 @@ class BreadboardConnector(QMainWindow):
             temp_end_x = max(0, min(temp_end_x, w-1))
             temp_end_y = max(0, min(temp_end_y, h-1))
             
-            # 绘制临时线
+            # 直接在 display_image 上绘制临时线（无额外拷贝）
             cv2.line(display_image, self.current_hole.position, (temp_end_x, temp_end_y), (0, 0, 255), 2)
         
         # 显示图像
         self.display_image(display_image)
     
     def update_display_with_path(self):
-        """更新显示，包括当前路径"""
+        """
+        更新显示，包括当前路径（优化版本 - 只创建一次图像副本）
+        
+        性能优化说明：
+        应用与 update_display 相同的优化策略：
+        1. 只在开始时创建一次图像副本
+        2. 直接在副本上绘制孔位（无额外拷贝）
+        3. 调用优化后的 draw_all_wires（无额外拷贝）
+        4. 直接在副本上绘制当前路径预览（无额外拷贝）
+        
+        确保在绘制多点路径预览时也不会产生链式图像拷贝。
+        """
         if self.image is None or not self.path_start_hole:
             return
             
-        # 创建显示图像
+        # 创建显示图像的副本（唯一的拷贝）
         display_image = self.image.copy()
         
-        # 绘制孔
+        # 直接在副本上绘制孔（原地修改，无额外拷贝）
         if self.show_holes_check.isChecked() and self.holes:
             for hole in self.holes:
                 cv2.circle(display_image, hole.position, int(hole.radius), (0, 255, 0), -1)
         
-        # 绘制已有的连接线
+        # 调用优化后的 draw_all_wires（直接在 display_image 上绘制）
         if self.show_wires_check.isChecked():
             display_image = self.wire_manager.draw_all_wires(display_image)
         
         # 获取当前颜色
         color = self.wire_manager.fixed_color if self.wire_manager.use_fixed_color else (0, 0, 255)
         
-        # 绘制当前路径
+        # 直接在 display_image 上绘制当前路径（无额外拷贝）
         if self.current_path:
             # 从起点到第一个中间点
             cv2.line(display_image, self.path_start_hole.position, self.current_path[0], color, 2, cv2.LINE_AA)
@@ -1161,19 +1255,30 @@ class BreadboardConnector(QMainWindow):
         self.display_image(display_image)
     
     def update_display_with_free_line(self):
-        """更新显示，包括自由线条预览"""
+        """
+        更新显示，包括自由线条预览（优化版本 - 只创建一次图像副本）
+        
+        性能优化说明：
+        应用与 update_display 相同的优化策略：
+        1. 只在开始时创建一次图像副本
+        2. 直接在副本上绘制孔位（无额外拷贝）
+        3. 调用优化后的 draw_all_wires（无额外拷贝）
+        4. 直接在副本上绘制自由线条预览（无额外拷贝）
+        
+        确保在绘制自由线条预览时也不会产生链式图像拷贝。
+        """
         if self.image is None or not self.free_drawing or not self.free_start_pos or not self.temp_line_end:
             return
             
-        # 创建显示图像
+        # 创建显示图像的副本（唯一的拷贝）
         display_image = self.image.copy()
         
-        # 绘制孔
+        # 直接在副本上绘制孔（原地修改，无额外拷贝）
         if self.show_holes_check.isChecked() and self.holes:
             for hole in self.holes:
                 cv2.circle(display_image, hole.position, int(hole.radius), (0, 255, 0), -1)
         
-        # 绘制已有的连接线
+        # 调用优化后的 draw_all_wires（直接在 display_image 上绘制）
         if self.show_wires_check.isChecked():
             display_image = self.wire_manager.draw_all_wires(display_image)
         
@@ -1197,7 +1302,7 @@ class BreadboardConnector(QMainWindow):
             temp_end_x = max(0, min(temp_end_x, w-1))
             temp_end_y = max(0, min(temp_end_y, h-1))
             
-            # 绘制自由线条预览
+            # 直接在 display_image 上绘制自由线条预览（无额外拷贝）
             if not self.free_waypoints:
                 # 没有中间点，直接画线
                 cv2.line(display_image, self.free_start_pos, (temp_end_x, temp_end_y), color, 2, cv2.LINE_AA)
