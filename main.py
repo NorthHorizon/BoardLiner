@@ -248,7 +248,7 @@ class BreadboardConnector(QMainWindow):
         return int(time.time() * 1000)
         
     def initUI(self):
-        self.setWindowTitle('面包板连线工具')
+        self.setWindowTitle('面包板连线工具 v2.1.1')
         self.setGeometry(100, 100, 1200, 800)
         
         # 创建中央部件
@@ -1413,6 +1413,9 @@ class BreadboardConnector(QMainWindow):
                 # 创建连接线管理器
                 self.wire_manager = WireManager.from_dict(data, self.holes)
                 
+                # 清空历史记录，避免撤销到导入前的状态
+                self.wire_manager.clear_history()
+                
                 # 更新显示
                 self.update_display()
                 
@@ -1450,6 +1453,23 @@ class BreadboardConnector(QMainWindow):
         if event.key() == Qt.Key_Delete:
             if self.current_tool == self.TOOL_SELECT and self.wire_manager.selected_wire:
                 self.delete_selected_wire()
+                return
+        
+        # ESC 键取消当前绘制
+        if event.key() == Qt.Key_Escape:
+            if self.current_tool == self.TOOL_PATH and self.path_start_hole:
+                # 取消路径绘制
+                self.cancel_current_path()
+                self.statusBar.showMessage('已取消路径绘制')
+                return
+            elif self.current_tool == self.TOOL_FREE and self.free_drawing:
+                # 取消自由线条绘制
+                self.free_drawing = False
+                self.free_start_pos = None
+                self.free_waypoints = []
+                self.temp_line_end = None
+                self.update_display()
+                self.statusBar.showMessage('已取消自由线条绘制')
                 return
         
         # 将键盘事件传递给图像标签

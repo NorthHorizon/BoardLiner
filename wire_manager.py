@@ -445,6 +445,9 @@ class WireManager:
         for wire in self.wires:
             new_wire = Wire(wire.start, wire.end, wire.color, wire.thickness)
             new_wire.waypoints = wire.waypoints.copy() if wire.waypoints else []
+            new_wire.is_free = wire.is_free
+            new_wire.start_pos = wire.start_pos
+            new_wire.end_pos = wire.end_pos
             current_state.append(new_wire)
             
         self.wire_history.append(current_state)
@@ -501,6 +504,10 @@ class WireManager:
         if self.wires:
             self.save_state()
         self.wires.clear()
+    
+    def clear_history(self):
+        """清空历史记录（用于导入数据后）"""
+        self.wire_history.clear()
     
     def draw_all_wires(self, image: np.ndarray) -> np.ndarray:
         """
